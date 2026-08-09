@@ -23,7 +23,8 @@ def load_cf_token():
 
 def load_gh_token():
     t = os.environ.get('GITHUB_TOKEN')
-    if t: return t
+    if t:
+        return t.strip()
     try:
         r = subprocess.run(['gh', 'auth', 'token'], capture_output=True, text=True, timeout=30)
         if r.returncode == 0 and r.stdout.strip():
