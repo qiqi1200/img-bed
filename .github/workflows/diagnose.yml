@@ -15,9 +15,11 @@ jobs:
           echo
           echo "=== keyword check ==="
           curl -s --max-time 20 https://img.260607.best/ > /tmp/page.html
-          for kw in "Guancii" "存个图。" "把图丢到这里" "ARCHIVING" "FILE No."; do
+          for kw in "Guancii" "存个图。" "把图丢到这里" "ARCHIVING" "FILE No." "leaves" "leaves-overlay.mp4" "multiply"; do
             grep -q "$kw" /tmp/page.html && echo "FOUND: $kw" || echo "MISSING: $kw"
           done
+          echo "=== mp4 CDN check ==="
+          curl -sL --max-time 30 -o /dev/null -w "mp4: HTTP %{http_code}, %{size_download} bytes\n" https://cdn.jsdelivr.net/gh/qiqi1200/img-bed@main/leaves-overlay.mp4
       - name: Upload test
         env:
           BED_SECRET: ${{ secrets.BED_SECRET }}
