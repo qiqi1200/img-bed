@@ -64,7 +64,7 @@ def main():
     print(f'[i] 账户: {acc["name"]}')
 
     ght = load_gh_token()
-    secret = args.secret or secrets.token_urlsafe(12)
+    secret = args.secret or os.environ.get('BED_SECRET') or secrets.token_urlsafe(12)
     print(f'[i] 图床访问密钥: {secret}  （网页打开时输入这个）')
 
     # 1. 部署 worker
