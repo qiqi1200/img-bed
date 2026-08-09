@@ -1,0 +1,43 @@
+name: Diagnose ImgBed Domain
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Diagnose
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          python - <<'EOF'
+          import json, os, urllib.request, urllib.error
+          BASE = 'https://api.cloudflare.com/client/v4'
+          token = os.environ['CLOUDFLARE_API_TOKEN']
+          def call(path):
+              req = urllib.request.Request(BASE + path, headers={'Authorization': f'Bearer {token}'})
+              try:
+                  r = urllib.request.urlopen(req, timeout=30)
+                  return r.status, json.loads(r.read().decode() or '{}')
+              except urllib.error.HTTPError as e:
+                  try: return e.code, json.loads(e.read().decode() or '{}')
+                  except: return e.code, {}
+          s, d = call('/accounts?per_page=5')
+          aid = d['result'][0]['id'] if d.get('result') else None
+          print('account:', d['result'][0]['name'] if d.get('result') else d.get('errors'))
+          s, d = call(f'/accounts/{aid}/workers/scripts/img-bed/subdomain') if aid else (None, {})
+          print('worker subdomain:', d if s == 200 else f'HTTP {s} {d}')
+          s, d = call(f'/accounts/{aid}/workers/domains') if aid else (None, {})
+          print('worker domains:', d if s == 200 else f'HTTP {s} {d.get("errors")}')
+          s, d = call('/zones?per_page=50')
+          zone = next((z for z in (d.get('result') or []) if z['name'] == '260607.best'), None)
+          print('zone 260607.best:', zone['id'] if zone else 'NOT FOUND')
+          if zone:
+              zid = zone['id']
+              s, d = call(f'/zones/{zid}/dns_records?name=img.260607.best')
+              print('dns img.260607.best:', [(r['type'], r['name'], r['content']) for r in (d.get('result') or [])] if s == 200 else f'HTTP {s} {d.get("errors")}')
+              s, d = call(f'/zones/{zid}/workers/routes')
+              print('worker routes:', [(r.get('pattern'), r.get('script')) for r in (d.get('result') or [])] if s == 200 else f'HTTP {s} {d.get("errors")}')
+          EOF
