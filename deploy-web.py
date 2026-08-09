@@ -79,11 +79,13 @@ def main():
         ],
     }
     boundary = '----imgbed' + secrets.token_hex(8)
-    def part(name, content, ctype):
-        return (f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"'
-                f'\r\nContent-Type: {ctype}\r\n\r\n').encode() + content + b'\r\n'
+    def part(name, content, ctype, filename=None):
+        disp = f'Content-Disposition: form-data; name="{name}"'
+        if filename:
+            disp += f'; filename="{filename}"'
+        return (f'--{boundary}\r\n{disp}\r\nContent-Type: {ctype}\r\n\r\n').encode() + content + b'\r\n'
     body = part('metadata', json.dumps(metadata).encode(), 'application/json') + \
-           part('web.js', script, 'application/javascript+module') + f'--{boundary}--\r\n'.encode()
+           part('web.js', script, 'application/javascript+module', filename='web.js') + f'--{boundary}--\r\n'.encode()
     s, d = call(cft, 'PUT', f'/accounts/{aid}/workers/scripts/{WORKER_NAME}',
                 body=body, headers={'Content-Type': f'multipart/form-data; boundary={boundary}'}, timeout=90)
     if s != 200:
