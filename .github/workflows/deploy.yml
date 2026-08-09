@@ -17,6 +17,6 @@ jobs:
       - name: Deploy to Cloudflare (img.260607.best)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           BED_SECRET: ${{ secrets.BED_SECRET }}
         run: python deploy-web.py --account Dianqiqi
