@@ -8,6 +8,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Public access test
+        run: |
+          echo "=== DNS via runner ==="
+          nslookup img.260607.best 2>&1 | tail -3
+          echo "=== curl page ==="
+          curl -s --max-time 20 -o /tmp/page.html -w "HTTP %{http_code}, %{size_download} bytes\n" https://img.260607.best/ || echo "CURL_FAIL"
+          head -c 200 /tmp/page.html 2>/dev/null; echo
       - name: Diagnose
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
