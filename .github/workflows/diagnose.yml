@@ -10,11 +10,28 @@ jobs:
       - uses: actions/checkout@v4
       - name: Public access test
         run: |
-          echo "=== DNS via runner ==="
-          nslookup img.260607.best 2>&1 | tail -3
-          echo "=== curl page ==="
-          curl -s --max-time 20 -o /tmp/page.html -w "HTTP %{http_code}, %{size_download} bytes\n" https://img.260607.best/ || echo "CURL_FAIL"
-          head -c 200 /tmp/page.html 2>/dev/null; echo
+          echo "=== curl page (head) ==="
+          curl -s --max-time 20 https://img.260607.best/ | head -c 600
+          echo
+          echo "=== keyword check ==="
+          curl -s --max-time 20 https://img.260607.best/ > /tmp/page.html
+          for kw in "Guancii" "存个图。" "把图丢到这里" "ARCHIVING" "FILE No."; do
+            grep -q "$kw" /tmp/page.html && echo "FOUND: $kw" || echo "MISSING: $kw"
+          done
+      - name: Upload test
+        env:
+          BED_SECRET: ${{ secrets.BED_SECRET }}
+        run: |
+          python - <<'EOF'
+          import base64
+          # 1x1 红色 PNG
+          png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==')
+          open('/tmp/test.png','wb').write(png)
+          EOF
+          echo "=== upload ==="
+          curl -s --max-time 30 -X POST https://img.260607.best/api/upload \
+            -H "X-Auth-Token: $BED_SECRET" -F "file=@/tmp/test.png" | head -c 400
+          echo
       - name: Diagnose
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
