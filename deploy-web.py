@@ -104,9 +104,29 @@ def main():
                 {'hostname': args.domain, 'service': WORKER_NAME, 'zone_id': zone['id']})
     if s == 200:
         print(f'[OK] 域名已绑定: https://{args.domain}（DNS 生效需几分钟）')
+        return
+    print(f'[i] Custom Domains API 不可用 ({s})，尝试 Worker Routes 方式...')
+    s, d = call(cft, 'POST', f'/zones/{zone["id"]}/workers/routes',
+                {'pattern': f'{args.domain}/*', 'script': WORKER_NAME})
+    if s != 200:
+        print(f'[!] Routes API 也不可用 ({s}): {d.get("errors")}')
+        print('    手动步骤: 控制台 dash.cloudflare.com → Workers → img-bed → Settings → Domains & Routes')
+        print(f'    添加路由: {args.domain}/* 指向 img-bed；再在 DNS 加 CNAME {args.domain} → img-bed.<workers.dev 子域>')
+        return
+    print('[OK] Worker Route 已添加，配置 CNAME 指向 workers.dev...')
+    s, d = call(cft, 'GET', f'/accounts/{aid}/workers/subdomain')
+    sub = (d.get('result') or {}).get('subdomain') if s == 200 else None
+    if not sub:
+        print('[!] 无法获取 workers.dev 子域，请手动在 DNS 加 CNAME（见控制台 worker 详情页的域名示例）')
+        return
+    target = f'{WORKER_NAME}.{sub}.workers.dev'
+    s, d = call(cft, 'POST', f'/zones/{zone["id"]}/dns_records',
+                {'type': 'CNAME', 'name': args.domain, 'content': target, 'proxied': True, 'ttl': 1})
+    if s == 200:
+        print(f'[OK] CNAME 已添加: {args.domain} → {target}（DNS 生效需几分钟）')
     else:
-        print(f'[!] 域名绑定失败 ({s}): {d.get("errors")}')
-        print('    手动: DNS 加 CNAME ' + args.domain + ' → ' + WORKER_NAME + '.<子域>.workers.dev，或控制台 Workers → img-bed → Settings → Domains & Routes')
+        print(f'[!] CNAME 添加失败 ({s}): {d.get("errors")}')
+        print(f'    手动: DNS 加 CNAME {args.domain} → {target}')
 
     print()
     print('=' * 60)
