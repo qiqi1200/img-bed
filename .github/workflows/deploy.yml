@@ -1,0 +1,21 @@
+name: Deploy ImgBed Worker
+
+on:
+  push:
+    branches: [main]
+    paths: ['web.js', 'deploy-web.py', '.github/workflows/deploy.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to Cloudflare (img.260607.best)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python deploy-web.py --account Dianqiqi
