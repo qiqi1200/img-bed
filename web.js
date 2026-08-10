@@ -9,7 +9,7 @@ const MAX_BYTES = 20 * 1024 * 1024;
 const ALLOWED = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif', 'image/svg+xml', 'image/bmp'];
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: cors() });
@@ -19,7 +19,7 @@ export default {
         return new Response(UI_HTML, { headers: { 'content-type': 'text/html; charset=utf-8', ...cors() } });
       }
       if (request.method === 'POST' && url.pathname === '/api/upload') {
-        return await handleUpload(request, env);
+        return await handleUpload(request, env, ctx);
       }
       if (request.method === 'POST' && url.pathname === '/api/verify') {
         return request.headers.get('X-Auth-Token') === env.BED_SECRET
@@ -33,7 +33,7 @@ export default {
   },
 };
 
-async function handleUpload(request, env) {
+async function handleUpload(request, env, ctx) {
   if (request.headers.get('X-Auth-Token') !== env.BED_SECRET) {
     return json({ error: '密钥不对' }, 401);
   }
@@ -71,6 +71,8 @@ async function handleUpload(request, env) {
       continue;
     }
     const url = 'https://testingcf.jsdelivr.net/gh/' + GH_USER + '/' + GH_REPO + '@' + GH_BRANCH + '/' + name;
+    // 预热 CDN 缓存（后台进行，不影响上传响应）：浏览器随后加载这张刚传的图直接走热缓存，不再等几秒冷缓存
+    if (ctx && ctx.waitUntil) { ctx.waitUntil(fetch(url, { headers: { 'User-Agent': 'img-bed-warm' } }).catch(function() {})); }
     results.push({ name: f.name, key: name, url: url, md: '![' + name + '](' + url + ')', ok: true });
   }
   return json({ results }, 200);
@@ -247,13 +249,12 @@ const UI_HTML = [
 'var dropT = $("drop-t");',
 'var uploaded = 0;',
 'var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;',
-'/* 树影视频懒加载：页面就绪后再拉流、淡入——首屏只铺宣纸纹理，不再等 2.3MB 视频 */',
+'/* 树影视频懒加载：页面就绪后再拉流；缓冲到可流畅播完（canplaythrough）才淡入起播，避免中途缓冲卡顿 */',
 'var leavesV = $("leaves");',
 'function startLeaves() {',
 '  if (!leavesV) return;',
-'  leavesV.src = "https://testingcf.jsdelivr.net/gh/qiqi1200/img-bed@main/leaves-overlay.mp4";',
-'  leavesV.addEventListener("canplay", function() { leavesV.classList.add("ready"); });',
-'  leavesV.play().catch(function() {});',
+'  leavesV.src = "https://testingcf.jsdelivr.net/gh/qiqi1200/img-bed@main/leaves-overlay-v2.mp4";',
+'  leavesV.addEventListener("canplaythrough", function() { leavesV.classList.add("ready"); leavesV.play().catch(function() {}); });',
 '}',
 'if (!reduced) {',
 '  if (document.readyState === "complete") startLeaves();',
@@ -342,7 +343,16 @@ const UI_HTML = [
 'function renderCard(f, it) {',
 '  var div = document.createElement("div");',
 '  div.className = "card";',
-'  div.innerHTML = \'<img alt="" src="\' + it.url + \'"><div class="info"><div class="no">FILE No. \' + it.key + \'</div><div class="url-row"><span class="url" title="\' + it.url + \'"></span><button class="act" data-copy="\' + it.url + \'">复制</button><button class="act" data-copy="\' + it.md + \'">MD</button></div></div>\';',
+'  div.innerHTML = \'<div class="info"><div class="no">FILE No. \' + it.key + \'</div><div class="url-row"><span class="url" title="\' + it.url + \'"></span><button class="act" data-copy="\' + it.url + \'">复制</button><button class="act" data-copy="\' + it.md + \'">MD</button></div></div>\';',
+'  /* 先用本地 blob 秒出预览，CDN 真图后台加载好再替换——不等 jsDelivr 冷缓存，也不占上传时的带宽 */',
+'  var imgEl = document.createElement("img");',
+'  imgEl.alt = "";',
+'  div.insertBefore(imgEl, div.firstChild);',
+'  var blobUrl = URL.createObjectURL(f);',
+'  imgEl.src = blobUrl;',
+'  var cdnImg = new Image();',
+'  cdnImg.onload = function() { imgEl.src = cdnImg.src; try { URL.revokeObjectURL(blobUrl); } catch (e) {} };',
+'  cdnImg.src = it.url;',
 '  list.prepend(div);',
 '  var urlEl = div.querySelector(".url");',
 '  typeUrl(urlEl, it.url);',
