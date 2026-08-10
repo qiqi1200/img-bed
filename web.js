@@ -249,8 +249,8 @@ const UI_HTML = [
 'var dropT = $("drop-t");',
 'var uploaded = 0;',
 'var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;',
-'/* 树影视频懒加载：页面就绪后先 play() 拉流，缓冲到可流畅播完（canplaythrough）才淡入显示 */
-'/* 注意：play() 必须在事件外先调用——preload=none 下不 play() 就不会拉数据，canplaythrough 永不触发 */',
+// 树影视频懒加载：页面就绪后先 play() 拉流，缓冲到可流畅播完（canplaythrough）才淡入显示
+// 注意：play() 必须在事件外先调用——preload=none 下不 play() 就不会拉数据，canplaythrough 永不触发
 'var leavesV = $("leaves");',
 'function startLeaves() {',
 '  if (!leavesV) return;',
