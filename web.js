@@ -53,7 +53,12 @@ async function handleUpload(request, env) {
     }
     const buf = new Uint8Array(await f.arrayBuffer());
     const name = tsName(f.name);
-    const b64 = btoa(String.fromCharCode(...buf));
+    // 分批转 base64（...buf 整体展开超过 V8 调用栈上限，大图会抛 "Maximum call stack size exceeded"）
+    let bin = '';
+    for (let i = 0; i < buf.length; i += 0x8000) {
+      bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+    }
+    const b64 = btoa(bin);
     const body = JSON.stringify({ message: 'upload ' + name, content: b64, branch: GH_BRANCH });
     const r = await fetch('https://api.github.com/repos/' + GH_USER + '/' + GH_REPO + '/contents/' + name, {
       method: 'PUT',
@@ -65,7 +70,7 @@ async function handleUpload(request, env) {
       results.push({ name: f.name, error: 'GitHub 提交失败 (' + r.status + ')' });
       continue;
     }
-    const url = 'https://cdn.jsdelivr.net/gh/' + GH_USER + '/' + GH_REPO + '@' + GH_BRANCH + '/' + name;
+    const url = 'https://testingcf.jsdelivr.net/gh/' + GH_USER + '/' + GH_REPO + '@' + GH_BRANCH + '/' + name;
     results.push({ name: f.name, key: name, url: url, md: '![' + name + '](' + url + ')', ok: true });
   }
   return json({ results }, 200);
@@ -114,7 +119,7 @@ const UI_HTML = [
 '  }',
 '  /* 模拟纸：rice-paper 宣纸纹理平铺（openhanako PaperTexture，160px 一块，fixed 固定） */',
 '  body {',
-'    background-image: url("https://cdn.jsdelivr.net/gh/qiqi1200/img-bed@main/rice-paper.png");',
+'    background-image: url("https://testingcf.jsdelivr.net/gh/qiqi1200/img-bed@main/rice-paper.png");',
 '    background-repeat: repeat; background-size: 160px; background-attachment: fixed;',
 '  }',
 '  /* 晴天模式：树叶光影叠层（openhanako LeavesOverlay） */',
@@ -162,7 +167,7 @@ const UI_HTML = [
 '  }',
 '  /* 卡片也铺宣纸纹理，normal 混合（openhanako Card 层同款） */',
 '  .card {',
-'    background-image: url("https://cdn.jsdelivr.net/gh/qiqi1200/img-bed@main/rice-paper.png");',
+'    background-image: url("https://testingcf.jsdelivr.net/gh/qiqi1200/img-bed@main/rice-paper.png");',
 '    background-repeat: repeat; background-size: 160px; background-attachment: fixed;',
 '    background-blend-mode: normal;',
 '  }',
@@ -194,7 +199,7 @@ const UI_HTML = [
 '</head>',
 '<body>',
 '<div class="leaves-bright" aria-hidden="true"></div>',
-'<video class="leaves" autoplay loop muted playsinline aria-hidden="true"><source src="https://cdn.jsdelivr.net/gh/qiqi1200/img-bed@main/leaves-overlay.mp4" type="video/mp4"></video>',
+'<video class="leaves" autoplay loop muted playsinline aria-hidden="true"><source src="https://testingcf.jsdelivr.net/gh/qiqi1200/img-bed@main/leaves-overlay.mp4" type="video/mp4"></video>',
 '<div class="wrap">',
 '  <header>',
 '    <span class="brand">Guancii · Imagebed</span>',
