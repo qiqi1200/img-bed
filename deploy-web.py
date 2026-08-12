@@ -78,7 +78,7 @@ def main():
     metadata = {
         'main_module': 'web.js',
         'compatibility_date': '2026-01-01',
-        'triggers': {'crons': ['0 * * * *']},  # 每小时整点：检查过期图片并删除
+        'triggers': [{'crons': ['0 * * * *']}],  # 每小时整点：检查过期图片并删除
         'bindings': [
             {'type': 'plain_text', 'name': 'GH_TOKEN', 'text': ght},
             {'type': 'plain_text', 'name': 'BED_SECRET', 'text': secret},
