@@ -67,7 +67,7 @@ async function handleUpload(request, env, ctx) {
     });
     if (!r.ok) {
       const msg = (await r.text()).slice(0, 200);
-      results.push({ name: f.name, error: 'GitHub 提交失败 (' + r.status + ')' });
+      results.push({ name: f.name, error: 'GitHub 提交失败 (' + r.status + '): ' + msg });
       continue;
     }
     const url = 'https://testingcf.jsdelivr.net/gh/' + GH_USER + '/' + GH_REPO + '@' + GH_BRANCH + '/' + name;
@@ -345,7 +345,7 @@ const UI_HTML = [
 'function renderCard(f, it) {',
 '  var div = document.createElement("div");',
 '  div.className = "card";',
-'  div.innerHTML = \'<div class="info"><div class="no">FILE No. \' + it.key + \'</div><div class="url-row"><span class="url" title="\' + it.url + \'"></span><button class="act" data-copy="\' + it.url + \'">复制</button><button class="act" data-copy="\' + it.md + \'">MD</button></div></div>\';',
+'  div.innerHTML = \'<div class="info"><div class="no">FILE No. \' + esc(it.key) + \'</div><div class="url-row"><span class="url" title="\' + esc(it.url) + \'"></span><button class="act" data-copy="\' + esc(it.url) + \'">复制</button><button class="act" data-copy="\' + esc(it.md) + \'">MD</button></div></div>\';',
 '  /* 先用本地 blob 秒出预览，CDN 真图后台加载好再替换——不等 jsDelivr 冷缓存，也不占上传时的带宽 */',
 '  var imgEl = document.createElement("img");',
 '  imgEl.alt = "";',
@@ -354,6 +354,7 @@ const UI_HTML = [
 '  imgEl.src = blobUrl;',
 '  var cdnImg = new Image();',
 '  cdnImg.onload = function() { imgEl.src = cdnImg.src; try { URL.revokeObjectURL(blobUrl); } catch (e) {} };',
+'  cdnImg.onerror = function() { try { URL.revokeObjectURL(blobUrl); } catch (e) {} };',
 '  cdnImg.src = it.url;',
 '  list.prepend(div);',
 '  var urlEl = div.querySelector(".url");',
@@ -385,11 +386,15 @@ const UI_HTML = [
 '    });',
 '  });',
 '}',
+'function esc(s) {',
+'  var d = document.createElement("div");',
+'  d.textContent = s; return d.innerHTML;',
+'}',
 'function renderErr(name, msg) {',
 '  var div = document.createElement("div");',
 '  div.className = "card err";',
 '  div.setAttribute("role", "alert");',
-'  div.innerHTML = \'<div class="info"><div class="no">\' + name + \'</div><div class="msg">\' + msg + \'</div></div>\';',
+'  div.innerHTML = \'<div class="info"><div class="no">\' + esc(name) + \'</div><div class="msg">\' + esc(msg) + \'</div></div>\';',
 '  list.prepend(div);',
 '}',
 'function typeUrl(el, text) {',
