@@ -102,8 +102,9 @@ async function handlePhotos(request, env) {
   }
   const d = await r.json();
   const IMG_EXT = /\.(png|jpe?g|gif|webp|avif|svg|bmp)$/i;
+  const TS_NAME = /^\d{8}[_-]?\d{6}/; // 只认上传命名（时间戳开头），排除 rice-paper.png 等资产文件
   const photos = (d.tree || [])
-    .filter((t) => t.type === 'blob' && IMG_EXT.test(t.path))
+    .filter((t) => t.type === 'blob' && IMG_EXT.test(t.path) && TS_NAME.test(t.path))
     .map((t) => {
       const name = t.path.split('/').pop();
       const url = 'https://testingcf.jsdelivr.net/gh/' + GH_USER + '/' + GH_REPO + '@' + GH_BRANCH + '/' + encodeURIComponent(name);
