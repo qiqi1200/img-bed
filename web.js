@@ -35,12 +35,22 @@ export default {
           : json({ ok: false }, 401);
       }
       if (request.method === 'GET' && url.pathname === '/api/photos') {
-        return await handlePhotos(request, env);
+        return await handlePhotos(request, env, ctx);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/delete') {
+        return await handleDelete(request, env, ctx);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/expiry') {
+        return await handleExpiry(request, env);
       }
       return json({ error: 'not found' }, 404);
     } catch (e) {
       return json({ error: 'internal: ' + e.message }, 500);
     }
+  },
+  // 定时任务：每小时检查过期清单，到点自动删图（默认无过期 = 不进清单）
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(checkExpired(env, ctx).catch(function() {}));
   },
 };
 
@@ -89,10 +99,13 @@ async function handleUpload(request, env, ctx) {
   return json({ results }, 200);
 }
 
-async function handlePhotos(request, env) {
+async function handlePhotos(request, env, ctx) {
   if (request.headers.get('X-Auth-Token') !== env.ADMIN_SECRET) {
     return json({ error: '密钥不对' }, 401);
   }
+  // 后台访问顺带清理已过期图片（后台进行，不阻塞列表响应）
+  if (ctx && ctx.waitUntil) { ctx.waitUntil(checkExpired(env, ctx).catch(function() {})); }
+  const man = await readManifest(env);
   // GitHub git trees API 一次拿全分支文件树（含每个 blob 的 size）
   const r = await fetch('https://api.github.com/repos/' + GH_USER + '/' + GH_REPO + '/git/trees/' + GH_BRANCH + '?recursive=1', {
     headers: { Authorization: 'Bearer ' + env.GH_TOKEN, 'User-Agent': 'img-bed', Accept: 'application/vnd.github+json' },
@@ -108,11 +121,138 @@ async function handlePhotos(request, env) {
     .map((t) => {
       const name = t.path.split('/').pop();
       const url = 'https://testingcf.jsdelivr.net/gh/' + GH_USER + '/' + GH_REPO + '@' + GH_BRANCH + '/' + encodeURIComponent(name);
-      return { name, size: t.size, date: parseTs(name), url, md: '![' + name + '](' + url + ')' };
+      return { name, size: t.size, date: parseTs(name), url, md: '![' + name + '](' + url + ')', expires: (man.expires && man.expires[name]) || null };
     })
     .sort((a, b) => b.name.localeCompare(a.name)); // 时间戳命名，倒序 = 最新在前
   const totalBytes = photos.reduce((s, p) => s + p.size, 0);
   return json({ count: photos.length, totalBytes, photos }, 200);
+}
+
+// 文件名 → 上传时间，兼容 20260812_123456_abcd.jpg 与 20260810095517_x4dm.jpg
+async function handleDelete(request, env, ctx) {
+  if (request.headers.get('X-Auth-Token') !== env.ADMIN_SECRET) {
+    return json({ error: '密钥不对' }, 401);
+  }
+  let body = {};
+  try { body = await request.json(); } catch (e) { return json({ error: '参数错误' }, 400); }
+  const name = String(body.name || '').trim();
+  if (!safeName(name)) return json({ error: '非法文件名' }, 400);
+  const r = await deleteFile(env, name);
+  if (!r.ok) return json({ error: r.error }, r.status);
+  purgeCache(ctx, name);
+  // 若该图在过期清单里，同步移除条目（后台执行）
+  ctx.waitUntil((async function() {
+    const man = await readManifest(env);
+    if (man && man.expires[name]) {
+      delete man.expires[name];
+      await writeManifest(env, man, 'delete ' + name);
+    }
+  })().catch(function() {}));
+  return json({ ok: true, name }, 200);
+}
+
+// 从 GitHub 删除单个文件（幂等：已不存在视为成功）
+async function deleteFile(env, name) {
+  const q = await fetch('https://api.github.com/repos/' + GH_USER + '/' + GH_REPO + '/contents/' + encodeURIComponent(name), {
+    headers: { Authorization: 'Bearer ' + env.GH_TOKEN, 'User-Agent': 'img-bed', Accept: 'application/vnd.github+json' },
+  });
+  if (q.status === 404) return { ok: true, status: 404 };
+  if (!q.ok) return { ok: false, status: 502, error: 'GitHub 查询失败 (' + q.status + ')' };
+  const meta = await q.json();
+  const d = await fetch('https://api.github.com/repos/' + GH_USER + '/' + GH_REPO + '/contents/' + encodeURIComponent(name), {
+    method: 'DELETE',
+    headers: { Authorization: 'Bearer ' + env.GH_TOKEN, 'User-Agent': 'img-bed', Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: 'delete ' + name, sha: meta.sha, branch: GH_BRANCH }),
+  });
+  if (!d.ok) {
+    const msg = (await d.text()).slice(0, 200);
+    return { ok: false, status: 502, error: '删除失败 (' + d.status + '): ' + msg };
+  }
+  return { ok: true, status: 200 };
+}
+
+// 立即清 jsDelivr CDN 缓存，URL 马上 404（后台执行，不影响响应）
+function purgeCache(ctx, name) {
+  if (ctx && ctx.waitUntil) {
+    ctx.waitUntil(fetch('https://purge.jsdelivr.net/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: ['/gh/' + GH_USER + '/' + GH_REPO + '@' + GH_BRANCH + '/' + name] }),
+    }).catch(function() {}));
+  }
+}
+
+// 只允许时间戳命名的图片文件（与上传命名一致），顺带防路径穿越
+function safeName(name) {
+  return /^\d{8}[_-]?\d{6}[_-][a-zA-Z0-9]+\.(png|jpe?g|gif|webp|avif|svg|bmp)$/i.test(name) && !name.includes('/') && !name.includes('..');
+}
+
+// ============ 过期清单（.imgbed.json：{version, expires:{文件名:ISO时间}}） ============
+const MANIFEST = '.imgbed.json';
+
+async function readManifest(env) {
+  const r = await fetch('https://api.github.com/repos/' + GH_USER + '/' + GH_REPO + '/contents/' + MANIFEST, {
+    headers: { Authorization: 'Bearer ' + env.GH_TOKEN, 'User-Agent': 'img-bed', Accept: 'application/vnd.github+json' },
+  });
+  if (r.status === 404) return { sha: null, expires: {} };
+  if (!r.ok) return null;
+  const d = await r.json();
+  let data = {};
+  try { data = JSON.parse(atob(d.content.replace(/\s/g, ''))); } catch (e) { data = {}; }
+  return { sha: d.sha, expires: (data && data.expires) || {} };
+}
+
+async function writeManifest(env, man, msg) {
+  const payload = { message: msg, content: btoa(JSON.stringify({ version: 1, expires: man.expires })), branch: GH_BRANCH };
+  if (man.sha) payload.sha = man.sha;
+  const r = await fetch('https://api.github.com/repos/' + GH_USER + '/' + GH_REPO + '/contents/' + MANIFEST, {
+    method: 'PUT',
+    headers: { Authorization: 'Bearer ' + env.GH_TOKEN, 'User-Agent': 'img-bed', 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) {
+    const msg2 = (await r.text()).slice(0, 200);
+    return { ok: false, status: r.status, error: '过期清单写入失败 (' + r.status + '): ' + msg2 };
+  }
+  return { ok: true, status: 200 };
+}
+
+// 检查并删除已到期的图片（cron 定时 + 后台打开时都会触发）
+async function checkExpired(env, ctx) {
+  const man = await readManifest(env);
+  if (!man) return;
+  const now = Date.now();
+  const due = Object.entries(man.expires).filter(function(e) { return new Date(e[1]).getTime() <= now; });
+  if (!due.length) return;
+  let removed = false;
+  for (const entry of due) {
+    const r = await deleteFile(env, entry[0]);
+    if (r.ok) { delete man.expires[entry[0]]; removed = true; purgeCache(ctx, entry[0]); }
+  }
+  if (removed) await writeManifest(env, man, 'expire cleanup');
+}
+
+// 设置/取消过期：body {name, days}，days=0/缺省 取消过期；days=N 从现在起 N 天后到期
+async function handleExpiry(request, env) {
+  if (request.headers.get('X-Auth-Token') !== env.ADMIN_SECRET) {
+    return json({ error: '密钥不对' }, 401);
+  }
+  let body = {};
+  try { body = await request.json(); } catch (e) { return json({ error: '参数错误' }, 400); }
+  const name = String(body.name || '').trim();
+  if (!safeName(name)) return json({ error: '非法文件名' }, 400);
+  const days = body.days == null ? null : Number(body.days);
+  const man = await readManifest(env);
+  if (!man) return json({ error: '过期清单读取失败' }, 502);
+  if (!days || days <= 0) {
+    delete man.expires[name];
+  } else {
+    if (!Number.isInteger(days) || days > 3650) return json({ error: '天数需为 1-3650 的整数' }, 400);
+    man.expires[name] = new Date(Date.now() + days * 86400000).toISOString();
+  }
+  const w = await writeManifest(env, man, 'set expiry ' + name);
+  if (!w.ok) return json({ error: w.error }, w.status);
+  return json({ ok: true, name, expires_at: man.expires[name] || null }, 200);
 }
 
 // 文件名 → 上传时间，兼容 20260812_123456_abcd.jpg 与 20260810095517_x4dm.jpg
@@ -530,10 +670,19 @@ const ADMIN_HTML = [
 '  .card img { width: 100%; aspect-ratio: 4/3; object-fit: cover; border-radius: 4px; border: 1px solid var(--line); background: #fff; display: block; }',
 '  .card .no { font-family: "JetBrains Mono", Consolas, monospace; font-size: 10px; letter-spacing: .04em; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
 '  .card .meta { font-family: "JetBrains Mono", Consolas, monospace; font-size: 10px; letter-spacing: .04em; color: var(--ink-2); }',
+'  .exp { font-family: "JetBrains Mono", Consolas, monospace; font-size: 10px; letter-spacing: .04em; display: flex; align-items: center; justify-content: space-between; gap: 6px; }',
+'  .exp .state { color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+'  .exp .state.hot { color: var(--danger); }',
+'  .exp-opts { display: none; flex-wrap: wrap; gap: 8px; }',
+'  .exp-opts.show { display: flex; }',
 '  .card .acts { display: flex; gap: 12px; }',
 '  .act { background: none; border: none; padding: 0; font: inherit; font-size: 11px; color: var(--ink-2); cursor: pointer; transition: color 150ms ease-out; }',
 '  .act:hover { color: var(--accent); }',
 '  .act.done { color: var(--accent); }',
+'  .act.danger { color: var(--danger); }',
+'  .act.danger:hover { color: #8F2F20; }',
+'  .act:disabled { opacity: .5; cursor: default; }',
+'  .card.gone { opacity: 0; transform: translateY(4px); transition: opacity 200ms ease-out, transform 200ms ease-out; }',
 '  .empty { font-family: "JetBrains Mono", Consolas, monospace; font-size: 12px; letter-spacing: .06em; color: var(--ink-3); margin-top: 24px; text-align: center; }',
 '  footer { margin-top: 40px; padding: 20px 0 32px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; font-size: 11px; color: var(--ink-3); font-family: "JetBrains Mono", Consolas, monospace; letter-spacing: .04em; }',
 '  @media (max-width: 768px) {',
@@ -555,7 +704,7 @@ const ADMIN_HTML = [
 '  </header>',
 '  <main>',
 '    <h1>照片档案。</h1>',
-'    <p class="sub">全部已归档图片，按时间倒序。点图看原图，或复制 URL / Markdown。</p>',
+'    <p class="sub">全部已归档图片，按时间倒序。点图看原图；「设过期」可定时自动删除，默认永不过期。</p>',
 '    <div class="toolbar">',
 '      <span class="stats" id="stats">翻阅档案中…</span>',
 '      <input class="search" id="search" type="text" placeholder="搜索 FILE No." autocomplete="off">',
@@ -630,15 +779,24 @@ const ADMIN_HTML = [
 '  else { list.forEach(function(p) { grid.appendChild(card(p)); }); }',
 '  $("count").textContent = "显示 " + list.length + " / " + photos.length + " 张";',
 '}',
+'function fmtExp(iso) {',
+'  var d = new Date(iso);',
+'  function p(n) { return (n < 10 ? "0" : "") + n; }',
+'  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes()) + " 到期";',
+'}',
 'function card(p) {',
 '  var div = document.createElement("div");',
 '  div.className = "card";',
+'  var expText = p.expires ? fmtExp(p.expires) : "永不过期";',
+'  var expHot = p.expires ? " hot" : "";',
 '  div.innerHTML =',
 '    \'<a class="thumb" href="\' + esc(p.url) + \'" target="_blank" rel="noopener" title="\' + esc(p.url) + \'"><img loading="lazy" src="\' + esc(p.url) + \'" alt=""></a>\' +',
 '    \'<div class="no">FILE No. \' + esc(p.name) + \'</div>\' +',
 '    \'<div class="meta">\' + esc(p.date || "—") + \' · \' + esc(fmtBytes(p.size)) + \'</div>\' +',
-'    \'<div class="acts"><button class="act" data-copy="\' + esc(p.url) + \'">复制 URL</button><button class="act" data-copy="\' + esc(p.md) + \'">复制 MD</button></div>\';',
-'  div.querySelectorAll(".act").forEach(function(b) {',
+'    \'<div class="exp"><span class="state\' + expHot + \'">\' + esc(expText) + \'</span><button class="act exp-btn">设过期</button></div>\' +',
+'    \'<div class="exp-opts"><button class="act" data-days="1">1天</button><button class="act" data-days="3">3天</button><button class="act" data-days="7">7天</button><button class="act" data-days="30">30天</button><button class="act" data-days="0">取消</button></div>\' +',
+'    \'<div class="acts"><button class="act" data-copy="\' + esc(p.url) + \'">复制 URL</button><button class="act" data-copy="\' + esc(p.md) + \'">复制 MD</button><button class="act danger del-btn">删除</button></div>\';',
+'  div.querySelectorAll(".act[data-copy]").forEach(function(b) {',
 '    b.addEventListener("click", function() {',
 '      var copyDone = function() {',
 '        var old = b.textContent;',
@@ -662,7 +820,68 @@ const ADMIN_HTML = [
 '      } else { fallbackCopy(); }',
 '    });',
 '  });',
+'  var expBtn = div.querySelector(".exp-btn"), optsEl = div.querySelector(".exp-opts");',
+'  expBtn.addEventListener("click", function() {',
+'    var show = optsEl.classList.toggle("show");',
+'    expBtn.textContent = show ? "收起" : "设过期";',
+'  });',
+'  optsEl.querySelectorAll(".act").forEach(function(b) {',
+'    b.addEventListener("click", function() { setExpiry(p.name, Number(b.dataset.days), div, expBtn, optsEl); });',
+'  });',
+'  var delBtn = div.querySelector(".del-btn");',
+'  delBtn.addEventListener("click", function() { doDelete(p.name, delBtn, div); });',
 '  return div;',
+'}',
+'function setExpiry(name, days, cardEl, expBtn, optsEl) {',
+'  var key = localStorage.getItem("bed_admin_key") || "";',
+'  fetch("/api/expiry", {',
+'    method: "POST",',
+'    headers: { "Content-Type": "application/json", "X-Auth-Token": key },',
+'    body: JSON.stringify({ name: name, days: days })',
+'  })',
+'  .then(function(r) { return r.json(); })',
+'  .then(function(d) {',
+'    if (d && d.ok) {',
+'      var stateEl = cardEl.querySelector(".state");',
+'      if (d.expires_at) { stateEl.textContent = fmtExp(d.expires_at); stateEl.classList.add("hot"); }',
+'      else { stateEl.textContent = "永不过期"; stateEl.classList.remove("hot"); }',
+'      optsEl.classList.remove("show"); expBtn.textContent = "设过期";',
+'    } else {',
+'      stats.textContent = (d && d.error) || "设置失败";',
+'    }',
+'  })',
+'  .catch(function() { stats.textContent = "网络错误"; });',
+'}',
+'function doDelete(name, btn, cardEl) {',
+'  if (btn.dataset.confirm !== "1") {',
+'    btn.dataset.confirm = "1";',
+'    btn.textContent = "确认删除？";',
+'    setTimeout(function() { btn.dataset.confirm = "0"; btn.textContent = "删除"; }, 3000);',
+'    return;',
+'  }',
+'  var key = localStorage.getItem("bed_admin_key") || "";',
+'  btn.disabled = true; btn.textContent = "删除中…";',
+'  fetch("/api/delete", {',
+'    method: "POST",',
+'    headers: { "Content-Type": "application/json", "X-Auth-Token": key },',
+'    body: JSON.stringify({ name: name })',
+'  })',
+'  .then(function(r) { return r.json(); })',
+'  .then(function(d) {',
+'    if (d && d.ok) {',
+'      cardEl.classList.add("gone");',
+'      setTimeout(function() {',
+'        cardEl.remove();',
+'        photos = photos.filter(function(q) { return q.name !== name; });',
+'        render();',
+'        stats.textContent = "共 " + photos.length + " 张 · " + fmtBytes(photos.reduce(function(s, q) { return s + q.size; }, 0));',
+'      }, 200);',
+'    } else {',
+'      btn.disabled = false; btn.dataset.confirm = "0"; btn.textContent = "删除";',
+'      stats.textContent = (d && d.error) || "删除失败";',
+'    }',
+'  })',
+'  .catch(function() { btn.disabled = false; btn.dataset.confirm = "0"; btn.textContent = "删除"; stats.textContent = "网络错误"; });',
 '}',
 '$("search").addEventListener("input", render);',
 '</script>',
