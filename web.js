@@ -106,6 +106,7 @@ async function handlePhotos(request, env, ctx) {
   // 后台访问顺带清理已过期图片（后台进行，不阻塞列表响应）
   if (ctx && ctx.waitUntil) { ctx.waitUntil(checkExpired(env, ctx).catch(function() {})); }
   const man = await readManifest(env);
+  const expMap = (man && man.expires) || {};
   // GitHub git trees API 一次拿全分支文件树（含每个 blob 的 size）
   const r = await fetch('https://api.github.com/repos/' + GH_USER + '/' + GH_REPO + '/git/trees/' + GH_BRANCH + '?recursive=1', {
     headers: { Authorization: 'Bearer ' + env.GH_TOKEN, 'User-Agent': 'img-bed', Accept: 'application/vnd.github+json' },
@@ -121,7 +122,7 @@ async function handlePhotos(request, env, ctx) {
     .map((t) => {
       const name = t.path.split('/').pop();
       const url = 'https://testingcf.jsdelivr.net/gh/' + GH_USER + '/' + GH_REPO + '@' + GH_BRANCH + '/' + encodeURIComponent(name);
-      return { name, size: t.size, date: parseTs(name), url, md: '![' + name + '](' + url + ')', expires: (man.expires && man.expires[name]) || null };
+      return { name, size: t.size, date: parseTs(name), url, md: '![' + name + '](' + url + ')', expires: expMap[name] || null };
     })
     .sort((a, b) => b.name.localeCompare(a.name)); // 时间戳命名，倒序 = 最新在前
   const totalBytes = photos.reduce((s, p) => s + p.size, 0);
@@ -141,13 +142,13 @@ async function handleDelete(request, env, ctx) {
   if (!r.ok) return json({ error: r.error }, r.status);
   purgeCache(ctx, name);
   // 若该图在过期清单里，同步移除条目（后台执行）
-  ctx.waitUntil((async function() {
+  if (ctx && ctx.waitUntil) { ctx.waitUntil((async function() {
     const man = await readManifest(env);
     if (man && man.expires[name]) {
       delete man.expires[name];
       await writeManifest(env, man, 'delete ' + name);
     }
-  })().catch(function() {}));
+  })().catch(function() {})); }
   return json({ ok: true, name }, 200);
 }
 
