@@ -67,6 +67,10 @@ def main():
     ght = load_gh_token()
     secret = args.secret or os.environ.get('BED_SECRET') or secrets.token_urlsafe(12)
     print(f'[i] 图床访问密钥: {secret}  （网页打开时输入这个）')
+    admin_secret = os.environ.get('ADMIN_SECRET')
+    if not admin_secret:
+        sys.exit('未设置 ADMIN_SECRET 环境变量（后台专属密钥，Actions 里已配 secret）')
+    print(f'[i] 后台专属密钥: {admin_secret}  （/admin 面板输入这个）')
 
     # 1. 部署 worker
     with open(SCRIPT, 'rb') as f:
@@ -77,6 +81,7 @@ def main():
         'bindings': [
             {'type': 'plain_text', 'name': 'GH_TOKEN', 'text': ght},
             {'type': 'plain_text', 'name': 'BED_SECRET', 'text': secret},
+            {'type': 'plain_text', 'name': 'ADMIN_SECRET', 'text': admin_secret},
         ],
     }
     boundary = '----imgbed' + secrets.token_hex(8)

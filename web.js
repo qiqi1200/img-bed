@@ -26,6 +26,17 @@ export default {
           ? json({ ok: true }, 200)
           : json({ ok: false }, 401);
       }
+      if (request.method === 'GET' && url.pathname === '/admin') {
+        return new Response(ADMIN_HTML, { headers: { 'content-type': 'text/html; charset=utf-8', ...cors() } });
+      }
+      if (request.method === 'POST' && url.pathname === '/api/verify-admin') {
+        return request.headers.get('X-Auth-Token') === env.ADMIN_SECRET
+          ? json({ ok: true }, 200)
+          : json({ ok: false }, 401);
+      }
+      if (request.method === 'GET' && url.pathname === '/api/photos') {
+        return await handlePhotos(request, env);
+      }
       return json({ error: 'not found' }, 404);
     } catch (e) {
       return json({ error: 'internal: ' + e.message }, 500);
@@ -76,6 +87,39 @@ async function handleUpload(request, env, ctx) {
     results.push({ name: f.name, key: name, url: url, md: '![' + name + '](' + url + ')', ok: true });
   }
   return json({ results }, 200);
+}
+
+async function handlePhotos(request, env) {
+  if (request.headers.get('X-Auth-Token') !== env.ADMIN_SECRET) {
+    return json({ error: '密钥不对' }, 401);
+  }
+  // GitHub git trees API 一次拿全分支文件树（含每个 blob 的 size）
+  const r = await fetch('https://api.github.com/repos/' + GH_USER + '/' + GH_REPO + '/git/trees/' + GH_BRANCH + '?recursive=1', {
+    headers: { Authorization: 'Bearer ' + env.GH_TOKEN, 'User-Agent': 'img-bed', Accept: 'application/vnd.github+json' },
+  });
+  if (!r.ok) {
+    return json({ error: 'GitHub 拉取失败 (' + r.status + ')' }, 502);
+  }
+  const d = await r.json();
+  const IMG_EXT = /\.(png|jpe?g|gif|webp|avif|svg|bmp)$/i;
+  const photos = (d.tree || [])
+    .filter((t) => t.type === 'blob' && IMG_EXT.test(t.path))
+    .map((t) => {
+      const name = t.path.split('/').pop();
+      const url = 'https://testingcf.jsdelivr.net/gh/' + GH_USER + '/' + GH_REPO + '@' + GH_BRANCH + '/' + encodeURIComponent(name);
+      return { name, size: t.size, date: parseTs(name), url, md: '![' + name + '](' + url + ')' };
+    })
+    .sort((a, b) => b.name.localeCompare(a.name)); // 时间戳命名，倒序 = 最新在前
+  const totalBytes = photos.reduce((s, p) => s + p.size, 0);
+  return json({ count: photos.length, totalBytes, photos }, 200);
+}
+
+// 文件名 → 上传时间，兼容 20260812_123456_abcd.jpg 与 20260810095517_x4dm.jpg
+function parseTs(name) {
+  const m = String(name).match(/^(\d{8})[_-]?(\d{6})/);
+  if (!m) return '';
+  return m[1].slice(0, 4) + '-' + m[1].slice(4, 6) + '-' + m[1].slice(6, 8) + ' ' +
+         m[2].slice(0, 2) + ':' + m[2].slice(2, 4) + ':' + m[2].slice(4, 6);
 }
 
 function tsName(orig) {
@@ -192,6 +236,8 @@ const UI_HTML = [
 '  .card.err .msg { font-size: 13px; color: var(--danger); }',
 '  .status { font-size: 12px; color: var(--danger); text-align: center; margin-top: 14px; min-height: 0; }',
 '  footer { margin-top: 40px; padding: 20px 0 32px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; font-size: 11px; color: var(--ink-3); font-family: "JetBrains Mono", Consolas, monospace; letter-spacing: .04em; }',
+'  .admin-link { color: inherit; text-decoration: none; border-bottom: 1px solid var(--line-strong); transition: color 150ms ease-out, border-color 150ms ease-out; }',
+'  .admin-link:hover { color: var(--accent); border-color: var(--accent); }',
 '  @media (max-width: 768px) {',
 '    .wrap { padding: 32px 16px 0; }',
 '    h1 { font-size: 24px; margin-top: 36px; }',
@@ -228,7 +274,7 @@ const UI_HTML = [
 '    <div class="list" id="list"></div>',
 '  </main>',
 '  <footer>',
-'    <span>Guancii 的图床 · qiqi1200/img-bed · jsDelivr CDN</span>',
+'    <span>Guancii 的图床 · qiqi1200/img-bed · jsDelivr CDN · <a class="admin-link" href="/admin">ADMIN</a></span>',
 '    <span id="count"></span>',
 '  </footer>',
 '</div>',
@@ -406,6 +452,218 @@ const UI_HTML = [
 '    if (i >= text.length) clearInterval(timer);',
 '  }, 12);',
 '}',
+'</script>',
+'</body>',
+'</html>',
+].join('\n');
+
+// ============ 后台（管理员面板 · 专属密钥 ADMIN_SECRET） ============
+const ADMIN_HTML = [
+'<!DOCTYPE html>',
+'<html lang="zh-CN">',
+'<head>',
+'<meta charset="UTF-8">',
+'<meta name="viewport" content="width=device-width, initial-scale=1">',
+'<title>Guancii 的图床 · 后台</title>',
+'<link rel="icon" href="https://testingcf.jsdelivr.net/gh/qiqi1200/img-bed@main/20260810095517_x4dm.jpg">',
+'<link rel="preload" as="image" href="https://testingcf.jsdelivr.net/gh/qiqi1200/img-bed@main/rice-paper.png">',
+'<link rel="preconnect" href="https://fonts.googleapis.cn">',
+'<link rel="preconnect" href="https://fonts.gstatic.cn" crossorigin>',
+'<link href="https://fonts.googleapis.cn/css2?family=Noto+Serif+SC:wght@500;700&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" media="print" onload="this.media=\'all\'">',
+'<noscript><link href="https://fonts.googleapis.cn/css2?family=Noto+Serif+SC:wght@500;700&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"></noscript>',
+'<style>',
+'  :root {',
+'    --paper: #F2EADA; --ink: #1A1A1A; --ink-2: #6E6655; --ink-3: #A69B85;',
+'    --line: #DED4C0; --line-strong: #C2B79E; --accent: #3A5CCC;',
+'    --accent-soft: #E8ECF9; --danger: #B3402F; --card: rgba(255,255,255,.5);',
+'  }',
+'  * { box-sizing: border-box; margin: 0; padding: 0; }',
+'  ::selection { background: var(--accent); color: var(--paper); }',
+'  html { -webkit-text-size-adjust: 100%; }',
+'  body {',
+'    font-family: "Inter", "Microsoft YaHei", sans-serif;',
+'    background: var(--paper); color: var(--ink);',
+'    min-height: 100vh; display: flex; flex-direction: column; align-items: center;',
+'    -webkit-font-smoothing: antialiased;',
+'  }',
+'  /* 与主页一致的模拟纸纹理 */',
+'  body {',
+'    background-image: url("https://testingcf.jsdelivr.net/gh/qiqi1200/img-bed@main/rice-paper.png");',
+'    background-repeat: repeat; background-size: 160px; background-attachment: fixed;',
+'  }',
+'  .wrap { width: min(960px, 92vw); margin: 0 auto; padding: 48px 24px 0; flex: 1; display: flex; flex-direction: column; position: relative; z-index: 1; }',
+'  header { display: flex; align-items: baseline; justify-content: space-between; padding-bottom: 16px; border-bottom: 1px solid var(--line); }',
+'  .brand { font-family: "JetBrains Mono", Consolas, monospace; font-size: 11px; letter-spacing: .14em; color: var(--ink-3); text-transform: uppercase; display: flex; align-items: center; gap: 8px; }',
+'  .brand .logo { width: 20px; height: 20px; border-radius: 5px; border: 1px solid var(--line); background: #fff; object-fit: cover; flex-shrink: 0; }',
+'  .back { font-family: "JetBrains Mono", Consolas, monospace; font-size: 11px; letter-spacing: .06em; color: var(--ink-2); text-decoration: none; transition: color 150ms ease-out; }',
+'  .back:hover { color: var(--accent); }',
+'  .gate { position: fixed; inset: 0; z-index: 100; background: var(--paper); display: flex; align-items: center; justify-content: center; transition: opacity 300ms ease-out; }',
+'  .gate.hide { opacity: 0; pointer-events: none; }',
+'  .gate-card { width: min(320px, 86vw); text-align: center; }',
+'  .gate-logo { width: 56px; height: 56px; border-radius: 14px; border: 1px solid var(--line); background: #fff; object-fit: cover; margin-bottom: 16px; box-shadow: 0 2px 10px rgba(0,0,0,.08); }',
+'  .gate-title { font-family: "Noto Serif SC", "Songti SC", SimSun, serif; font-size: 24px; font-weight: 700; }',
+'  .gate-sub { font-family: "JetBrains Mono", Consolas, monospace; font-size: 11px; letter-spacing: .1em; color: var(--ink-3); margin: 10px 0 28px; }',
+'  .gate input { border: none; border-bottom: 1px solid var(--line); background: transparent; width: 100%; padding: 6px 0; font: inherit; font-family: "JetBrains Mono", Consolas, monospace; font-size: 13px; color: var(--ink); text-align: center; outline: none; transition: border-color 150ms ease-out; }',
+'  .gate input:focus { border-bottom-color: var(--accent); }',
+'  .gate-btn { margin-top: 24px; border: none; background: var(--accent); color: #fff; border-radius: 8px; padding: 9px 0; width: 100%; font: inherit; font-size: 14px; cursor: pointer; transition: background 150ms ease-out; }',
+'  .gate-btn:hover { background: #2F4AA8; }',
+'  .gate-err { font-size: 12px; color: var(--danger); min-height: 16px; margin-top: 10px; }',
+'  main { flex: 1; }',
+'  h1 { font-family: "Noto Serif SC", "Songti SC", SimSun, serif; font-size: 28px; font-weight: 700; letter-spacing: -.01em; margin-top: 48px; }',
+'  .sub { font-size: 12px; line-height: 1.8; color: var(--ink-2); margin-top: 8px; }',
+'  .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 24px; padding-bottom: 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }',
+'  .stats { font-family: "JetBrains Mono", Consolas, monospace; font-size: 11px; letter-spacing: .06em; color: var(--ink-3); }',
+'  .search { border: none; border-bottom: 1px solid var(--line); background: transparent; width: min(260px, 100%); padding: 6px 0; font: inherit; font-family: "JetBrains Mono", Consolas, monospace; font-size: 12px; color: var(--ink); outline: none; transition: border-color 150ms ease-out; }',
+'  .search:focus { border-bottom-color: var(--accent); }',
+'  .grid { margin-top: 20px; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; padding-bottom: 8px; }',
+'  .card {',
+'    background: var(--card);',
+'    background-image: url("https://testingcf.jsdelivr.net/gh/qiqi1200/img-bed@main/rice-paper.png");',
+'    background-repeat: repeat; background-size: 160px; background-attachment: fixed;',
+'    border: 1px solid var(--line); border-radius: 8px; padding: 10px;',
+'    display: flex; flex-direction: column; gap: 8px;',
+'    animation: enter 220ms ease-out;',
+'  }',
+'  @keyframes enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }',
+'  .card a.thumb { display: block; }',
+'  .card img { width: 100%; aspect-ratio: 4/3; object-fit: cover; border-radius: 4px; border: 1px solid var(--line); background: #fff; display: block; }',
+'  .card .no { font-family: "JetBrains Mono", Consolas, monospace; font-size: 10px; letter-spacing: .04em; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+'  .card .meta { font-family: "JetBrains Mono", Consolas, monospace; font-size: 10px; letter-spacing: .04em; color: var(--ink-2); }',
+'  .card .acts { display: flex; gap: 12px; }',
+'  .act { background: none; border: none; padding: 0; font: inherit; font-size: 11px; color: var(--ink-2); cursor: pointer; transition: color 150ms ease-out; }',
+'  .act:hover { color: var(--accent); }',
+'  .act.done { color: var(--accent); }',
+'  .empty { font-family: "JetBrains Mono", Consolas, monospace; font-size: 12px; letter-spacing: .06em; color: var(--ink-3); margin-top: 24px; text-align: center; }',
+'  footer { margin-top: 40px; padding: 20px 0 32px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; font-size: 11px; color: var(--ink-3); font-family: "JetBrains Mono", Consolas, monospace; letter-spacing: .04em; }',
+'  @media (max-width: 768px) {',
+'    .wrap { padding: 32px 16px 0; }',
+'    h1 { font-size: 24px; margin-top: 36px; }',
+'    .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }',
+'    footer { flex-direction: column; gap: 4px; }',
+'  }',
+'  @media (prefers-reduced-motion: reduce) {',
+'    * { animation: none !important; transition: none !important; }',
+'  }',
+'</style>',
+'</head>',
+'<body>',
+'<div class="wrap">',
+'  <header>',
+'    <span class="brand"><img class="logo" src="https://testingcf.jsdelivr.net/gh/qiqi1200/img-bed@main/20260810095517_x4dm.jpg" alt="">Guancii · Imagebed · Admin</span>',
+'    <a class="back" href="/">← 回上传页</a>',
+'  </header>',
+'  <main>',
+'    <h1>照片档案。</h1>',
+'    <p class="sub">全部已归档图片，按时间倒序。点图看原图，或复制 URL / Markdown。</p>',
+'    <div class="toolbar">',
+'      <span class="stats" id="stats">翻阅档案中…</span>',
+'      <input class="search" id="search" type="text" placeholder="搜索 FILE No." autocomplete="off">',
+'    </div>',
+'    <div class="grid" id="grid"></div>',
+'  </main>',
+'  <footer>',
+'    <span>Guancii 的图床 · ADMIN CONSOLE</span>',
+'    <span id="count"></span>',
+'  </footer>',
+'</div>',
+'<div class="gate" id="gate">',
+'  <div class="gate-card">',
+'    <img class="gate-logo" src="https://testingcf.jsdelivr.net/gh/qiqi1200/img-bed@main/20260810095517_x4dm.jpg" alt="">',
+'    <div class="gate-title">图床后台</div>',
+'    <div class="gate-sub">ADMIN · 输入专属密钥</div>',
+'    <input id="gate-key" type="password" placeholder="管理员密钥" autocomplete="off">',
+'    <button class="gate-btn" id="gate-btn">进入</button>',
+'    <div class="gate-err" id="gate-err"></div>',
+'  </div>',
+'</div>',
+'<script>',
+'var $ = function(id) { return document.getElementById(id); };',
+'var gate = $("gate"), gateKey = $("gate-key"), gateBtn = $("gate-btn"), gateErr = $("gate-err");',
+'var grid = $("grid"), stats = $("stats");',
+'var photos = [];',
+'function verifyAdmin(key, cb) {',
+'  fetch("/api/verify-admin", { method: "POST", headers: { "X-Auth-Token": key } })',
+'    .then(function(r) { cb(r.ok); })',
+'    .catch(function() { cb(false); });',
+'}',
+'function unlock() { gate.classList.add("hide"); load(); }',
+'function submitKey() {',
+'  var k = gateKey.value.trim();',
+'  if (!k) return;',
+'  verifyAdmin(k, function(ok) {',
+'    if (ok) { localStorage.setItem("bed_admin_key", k); gateErr.textContent = ""; unlock(); gateKey.blur(); }',
+'    else { gateErr.textContent = "密钥不对"; gateKey.value = ""; gateKey.focus(); }',
+'  });',
+'}',
+'gateBtn.addEventListener("click", submitKey);',
+'gateKey.addEventListener("keydown", function(e) { if (e.key === "Enter") submitKey(); });',
+'var savedKey = localStorage.getItem("bed_admin_key") || "";',
+'if (savedKey) { verifyAdmin(savedKey, function(ok) { if (ok) unlock(); else gateKey.focus(); }); }',
+'else { gateKey.focus(); }',
+'function fmtBytes(n) {',
+'  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";',
+'  if (n >= 1024) return Math.round(n / 1024) + " KB";',
+'  return n + " B";',
+'}',
+'function load() {',
+'  var key = localStorage.getItem("bed_admin_key") || "";',
+'  fetch("/api/photos", { headers: { "X-Auth-Token": key } })',
+'    .then(function(r) { return r.json(); })',
+'    .then(function(d) {',
+'      if (!d || d.error) { stats.textContent = (d && d.error) || "响应异常"; return; }',
+'      photos = d.photos || [];',
+'      stats.textContent = "共 " + d.count + " 张 · " + fmtBytes(d.totalBytes);',
+'      render();',
+'    })',
+'    .catch(function() { stats.textContent = "加载失败"; });',
+'}',
+'function esc(s) {',
+'  var d = document.createElement("div");',
+'  d.textContent = s; return d.innerHTML;',
+'}',
+'function render() {',
+'  var kw = ($("search").value || "").trim().toLowerCase();',
+'  var list = photos.filter(function(p) { return !kw || p.name.toLowerCase().indexOf(kw) !== -1; });',
+'  grid.innerHTML = "";',
+'  if (!list.length) { grid.innerHTML = \'<div class="empty">这里还没有照片。</div>\'; }',
+'  else { list.forEach(function(p) { grid.appendChild(card(p)); }); }',
+'  $("count").textContent = "显示 " + list.length + " / " + photos.length + " 张";',
+'}',
+'function card(p) {',
+'  var div = document.createElement("div");',
+'  div.className = "card";',
+'  div.innerHTML =',
+'    \'<a class="thumb" href="\' + esc(p.url) + \'" target="_blank" rel="noopener" title="\' + esc(p.url) + \'"><img loading="lazy" src="\' + esc(p.url) + \'" alt=""></a>\' +',
+'    \'<div class="no">FILE No. \' + esc(p.name) + \'</div>\' +',
+'    \'<div class="meta">\' + esc(p.date || "—") + \' · \' + esc(fmtBytes(p.size)) + \'</div>\' +',
+'    \'<div class="acts"><button class="act" data-copy="\' + esc(p.url) + \'">复制 URL</button><button class="act" data-copy="\' + esc(p.md) + \'">复制 MD</button></div>\';',
+'  div.querySelectorAll(".act").forEach(function(b) {',
+'    b.addEventListener("click", function() {',
+'      var copyDone = function() {',
+'        var old = b.textContent;',
+'        b.textContent = "已复制";',
+'        b.classList.add("done");',
+'        setTimeout(function() { b.textContent = old; b.classList.remove("done"); }, 1200);',
+'      };',
+'      var fallbackCopy = function() {',
+'        var ta = document.createElement("textarea");',
+'        ta.value = b.dataset.copy;',
+'        ta.style.cssText = "position:fixed;opacity:0;left:-9999px;top:0";',
+'        document.body.appendChild(ta);',
+'        ta.focus(); ta.select();',
+'        var ok = false;',
+'        try { ok = document.execCommand("copy"); } catch (e) { ok = false; }',
+'        document.body.removeChild(ta);',
+'        if (ok) { copyDone(); } else { b.textContent = "复制失败，请手动选中"; }',
+'      };',
+'      if (navigator.clipboard && window.isSecureContext) {',
+'        navigator.clipboard.writeText(b.dataset.copy).then(copyDone, fallbackCopy);',
+'      } else { fallbackCopy(); }',
+'    });',
+'  });',
+'  return div;',
+'}',
+'$("search").addEventListener("input", render);',
 '</script>',
 '</body>',
 '</html>',
