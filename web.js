@@ -22,7 +22,7 @@ export default {
         return await handleUpload(request, env, ctx);
       }
       if (request.method === 'POST' && url.pathname === '/api/verify') {
-        return request.headers.get('X-Auth-Token') === env.BED_SECRET
+        return authed(request.headers.get('X-Auth-Token'), env.BED_SECRET)
           ? json({ ok: true }, 200)
           : json({ ok: false }, 401);
       }
@@ -30,7 +30,7 @@ export default {
         return new Response(ADMIN_HTML, { headers: { 'content-type': 'text/html; charset=utf-8', ...cors() } });
       }
       if (request.method === 'POST' && url.pathname === '/api/verify-admin') {
-        return request.headers.get('X-Auth-Token') === env.ADMIN_SECRET
+        return authed(request.headers.get('X-Auth-Token'), env.ADMIN_SECRET)
           ? json({ ok: true }, 200)
           : json({ ok: false }, 401);
       }
@@ -55,7 +55,7 @@ export default {
 };
 
 async function handleUpload(request, env, ctx) {
-  if (request.headers.get('X-Auth-Token') !== env.BED_SECRET) {
+  if (!authed(request.headers.get('X-Auth-Token'), env.BED_SECRET)) {
     return json({ error: '密钥不对' }, 401);
   }
   const form = await request.formData();
@@ -100,7 +100,7 @@ async function handleUpload(request, env, ctx) {
 }
 
 async function handlePhotos(request, env, ctx) {
-  if (request.headers.get('X-Auth-Token') !== env.ADMIN_SECRET) {
+  if (!authed(request.headers.get('X-Auth-Token'), env.ADMIN_SECRET)) {
     return json({ error: '密钥不对' }, 401);
   }
   // 后台访问顺带清理已过期图片（后台进行，不阻塞列表响应）
@@ -125,13 +125,20 @@ async function handlePhotos(request, env, ctx) {
       return { name, size: t.size, date: parseTs(name), url, md: '![' + name + '](' + url + ')', expires: expMap[name] || null };
     })
     .sort((a, b) => b.name.localeCompare(a.name)); // 时间戳命名，倒序 = 最新在前
+  // 预热列表全部图片的 CDN 缓存（后台进行，不阻塞响应）：后台缩略图直接走热缓存，
+  // 不再每张等几秒冷缓存（冷缓存时 jsDelivr 要先回源 GitHub，大图实测要 6~28 秒）
+  if (ctx && ctx.waitUntil) {
+    ctx.waitUntil((async function() {
+      for (const p of photos) { await fetch(p.url, { headers: { 'User-Agent': 'img-bed-warm' } }).catch(function() {}); }
+    })());
+  }
   const totalBytes = photos.reduce((s, p) => s + p.size, 0);
   return json({ count: photos.length, totalBytes, photos }, 200);
 }
 
 // 文件名 → 上传时间，兼容 20260812_123456_abcd.jpg 与 20260810095517_x4dm.jpg
 async function handleDelete(request, env, ctx) {
-  if (request.headers.get('X-Auth-Token') !== env.ADMIN_SECRET) {
+  if (!authed(request.headers.get('X-Auth-Token'), env.ADMIN_SECRET)) {
     return json({ error: '密钥不对' }, 401);
   }
   let body = {};
@@ -235,7 +242,7 @@ async function checkExpired(env, ctx) {
 
 // 设置/取消过期：body {name, days}，days=0/缺省 取消过期；days=N 从现在起 N 天后到期
 async function handleExpiry(request, env) {
-  if (request.headers.get('X-Auth-Token') !== env.ADMIN_SECRET) {
+  if (!authed(request.headers.get('X-Auth-Token'), env.ADMIN_SECRET)) {
     return json({ error: '密钥不对' }, 401);
   }
   let body = {};
@@ -277,6 +284,12 @@ function cors() {
 }
 function json(obj, status) {
   return new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json; charset=utf-8', ...cors() } });
+}
+
+// 密钥比对统一 trim：防 GitHub secret 值带尾部换行/空格导致永远不匹配（手机端踩过）
+function authed(header, secret) {
+  const t = String(header || '').trim();
+  return t !== '' && t === String(secret || '').trim();
 }
 
 // ============ 纸上档案馆 UI（暖纸 + 树影） ============
@@ -425,7 +438,7 @@ const UI_HTML = [
 '    <img class="gate-logo" src="https://testingcf.jsdelivr.net/gh/qiqi1200/img-bed@main/20260810095517_x4dm.jpg" alt="">',
 '    <div class="gate-title">Guancii 的图床</div>',
 '    <div class="gate-sub">IMAGEBED · 输入密钥进入</div>',
-'    <input id="gate-key" type="password" placeholder="密钥" autocomplete="off">',
+'    <input id="gate-key" type="password" placeholder="密钥" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">',
 '    <button class="gate-btn" id="gate-btn">进入</button>',
 '    <div class="gate-err" id="gate-err"></div>',
 '  </div>',
@@ -437,13 +450,14 @@ const UI_HTML = [
 'var dropT = $("drop-t");',
 'var uploaded = 0;',
 'var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;',
-// 树影视频懒加载：页面就绪后先 play() 拉流，缓冲到可流畅播完（canplaythrough）才淡入显示
-// 注意：play() 必须在事件外先调用——preload=none 下不 play() 就不会拉数据，canplaythrough 永不触发
+// 树影视频懒加载：页面就绪后先 play() 拉流，首帧可播（playing）就淡入——大陆慢网下
+// canplaythrough 要等整段 306KB 缓冲完（实测 ~4s），playing 只需首帧（<1s）就出画面
+// 注意：play() 必须在事件外先调用——preload=none 下不 play() 就不会拉数据，playing 永不触发
 'var leavesV = $("leaves");',
 'function startLeaves() {',
 '  if (!leavesV) return;',
 '  leavesV.src = "https://testingcf.jsdelivr.net/gh/qiqi1200/img-bed@main/leaves-overlay-v2.mp4";',
-'  leavesV.addEventListener("canplaythrough", function() { leavesV.classList.add("ready"); });',
+'  leavesV.addEventListener("playing", function() { leavesV.classList.add("ready"); });',
 '  leavesV.play().catch(function() {});',
 '}',
 'if (!reduced) {',
@@ -455,21 +469,22 @@ const UI_HTML = [
 'function verifyKey(key, cb) {',
 '  fetch("/api/verify", { method: "POST", headers: { "X-Auth-Token": key } })',
 '    .then(function(r) { cb(r.ok); })',
-'    .catch(function() { cb(false); });',
+'    .catch(function() { cb("network"); });', // 网络失败单独标出，避免和密钥错误混为一谈（手机端常见）
 '}',
 'function unlock() { gate.classList.add("hide"); }',
 'function submitKey() {',
 '  var k = gateKey.value.trim();',
 '  if (!k) return;',
-'  verifyKey(k, function(ok) {',
-'    if (ok) { localStorage.setItem("bed_key", k); gateErr.textContent = ""; unlock(); gateKey.blur(); }',
+'  verifyKey(k, function(res) {',
+'    if (res === true) { localStorage.setItem("bed_key", k); gateErr.textContent = ""; unlock(); gateKey.blur(); }',
+'    else if (res === "network") { gateErr.textContent = "网络错误，请检查网络后重试"; gateKey.focus(); }',
 '    else { gateErr.textContent = "密钥不对"; gateKey.value = ""; gateKey.focus(); }',
 '  });',
 '}',
 'gateBtn.addEventListener("click", submitKey);',
 'gateKey.addEventListener("keydown", function(e) { if (e.key === "Enter") submitKey(); });',
 'var savedKey = localStorage.getItem("bed_key") || "";',
-'if (savedKey) { verifyKey(savedKey, function(ok) { if (ok) unlock(); else gateKey.focus(); }); }',
+'if (savedKey) { verifyKey(savedKey, function(res) { if (res === true) unlock(); else gateKey.focus(); }); }',
 'else { gateKey.focus(); }',
 'drop.addEventListener("click", function() { fileEl.click(); });',
 'drop.addEventListener("keydown", function(e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileEl.click(); } });',
@@ -722,7 +737,7 @@ const ADMIN_HTML = [
 '    <img class="gate-logo" src="https://testingcf.jsdelivr.net/gh/qiqi1200/img-bed@main/20260810095517_x4dm.jpg" alt="">',
 '    <div class="gate-title">图床后台</div>',
 '    <div class="gate-sub">ADMIN · 输入专属密钥</div>',
-'    <input id="gate-key" type="password" placeholder="管理员密钥" autocomplete="off">',
+'    <input id="gate-key" type="password" placeholder="管理员密钥" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">',
 '    <button class="gate-btn" id="gate-btn">进入</button>',
 '    <div class="gate-err" id="gate-err"></div>',
 '  </div>',
@@ -735,21 +750,22 @@ const ADMIN_HTML = [
 'function verifyAdmin(key, cb) {',
 '  fetch("/api/verify-admin", { method: "POST", headers: { "X-Auth-Token": key } })',
 '    .then(function(r) { cb(r.ok); })',
-'    .catch(function() { cb(false); });',
+'    .catch(function() { cb("network"); });', // 网络失败单独标出，避免和密钥错误混为一谈（手机端常见）
 '}',
 'function unlock() { gate.classList.add("hide"); load(); }',
 'function submitKey() {',
 '  var k = gateKey.value.trim();',
 '  if (!k) return;',
-'  verifyAdmin(k, function(ok) {',
-'    if (ok) { localStorage.setItem("bed_admin_key", k); gateErr.textContent = ""; unlock(); gateKey.blur(); }',
+'  verifyAdmin(k, function(res) {',
+'    if (res === true) { localStorage.setItem("bed_admin_key", k); gateErr.textContent = ""; unlock(); gateKey.blur(); }',
+'    else if (res === "network") { gateErr.textContent = "网络错误，请检查网络后重试"; gateKey.focus(); }',
 '    else { gateErr.textContent = "密钥不对"; gateKey.value = ""; gateKey.focus(); }',
 '  });',
 '}',
 'gateBtn.addEventListener("click", submitKey);',
 'gateKey.addEventListener("keydown", function(e) { if (e.key === "Enter") submitKey(); });',
 'var savedKey = localStorage.getItem("bed_admin_key") || "";',
-'if (savedKey) { verifyAdmin(savedKey, function(ok) { if (ok) unlock(); else gateKey.focus(); }); }',
+'if (savedKey) { verifyAdmin(savedKey, function(res) { if (res === true) unlock(); else gateKey.focus(); }); }',
 'else { gateKey.focus(); }',
 'function fmtBytes(n) {',
 '  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";',
