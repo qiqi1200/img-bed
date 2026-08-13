@@ -43,6 +43,9 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/expiry') {
         return await handleExpiry(request, env);
       }
+      if (request.method === 'GET' && url.pathname.startsWith('/i/')) {
+        return await handleImage(request, env);
+      }
       return json({ error: 'not found' }, 404);
     } catch (e) {
       return json({ error: 'internal: ' + e.message }, 500);
@@ -91,9 +94,10 @@ async function handleUpload(request, env, ctx) {
       results.push({ name: f.name, error: 'GitHub 提交失败 (' + r.status + '): ' + msg });
       continue;
     }
-    const url = 'https://testingcf.jsdelivr.net/gh/' + GH_USER + '/' + GH_REPO + '@' + GH_BRANCH + '/' + name;
+    const url = new URL('/i/' + name, request.url).href;
     // 预热 CDN 缓存（后台进行，不影响上传响应）：浏览器随后加载这张刚传的图直接走热缓存，不再等几秒冷缓存
-    if (ctx && ctx.waitUntil) { ctx.waitUntil(fetch(url, { headers: { 'User-Agent': 'img-bed-warm' } }).catch(function() {})); }
+    const cdnUrl = 'https://testingcf.jsdelivr.net/gh/' + GH_USER + '/' + GH_REPO + '@' + GH_BRANCH + '/' + name;
+    if (ctx && ctx.waitUntil) { ctx.waitUntil(fetch(cdnUrl, { headers: { 'User-Agent': 'img-bed-warm' } }).catch(function() {})); }
     results.push({ name: f.name, key: name, url: url, md: '![' + name + '](' + url + ')', ok: true });
   }
   return json({ results }, 200);
@@ -121,7 +125,7 @@ async function handlePhotos(request, env, ctx) {
     .filter((t) => t.type === 'blob' && IMG_EXT.test(t.path) && TS_NAME.test(t.path))
     .map((t) => {
       const name = t.path.split('/').pop();
-      const url = 'https://testingcf.jsdelivr.net/gh/' + GH_USER + '/' + GH_REPO + '@' + GH_BRANCH + '/' + encodeURIComponent(name);
+      const url = new URL('/i/' + encodeURIComponent(name), request.url).href;
       return { name, size: t.size, date: parseTs(name), url, md: '![' + name + '](' + url + ')', expires: expMap[name] || null };
     })
     .sort((a, b) => b.name.localeCompare(a.name)); // 时间戳命名，倒序 = 最新在前
@@ -129,7 +133,7 @@ async function handlePhotos(request, env, ctx) {
   // 不再每张等几秒冷缓存（冷缓存时 jsDelivr 要先回源 GitHub，大图实测要 6~28 秒）
   if (ctx && ctx.waitUntil) {
     ctx.waitUntil((async function() {
-      for (const p of photos) { await fetch(p.url, { headers: { 'User-Agent': 'img-bed-warm' } }).catch(function() {}); }
+      for (const p of photos) { await fetch('https://testingcf.jsdelivr.net/gh/' + GH_USER + '/' + GH_REPO + '@' + GH_BRANCH + '/' + p.name, { headers: { 'User-Agent': 'img-bed-warm' } }).catch(function() {}); }
     })());
   }
   const totalBytes = photos.reduce((s, p) => s + p.size, 0);
@@ -147,15 +151,14 @@ async function handleDelete(request, env, ctx) {
   if (!safeName(name)) return json({ error: '非法文件名' }, 400);
   const r = await deleteFile(env, name);
   if (!r.ok) return json({ error: r.error }, r.status);
+  // 墓碑同步落盘（不等后台）：/i/<name> 从此返回 410，URL 彻底失效
+  const man = await readManifest(env);
+  if (!man) return json({ error: '清单读取失败，删除未完成' }, 502);
+  man.deleted[name] = new Date().toISOString();
+  if (man.expires[name]) delete man.expires[name];
+  const w = await writeManifest(env, man, 'delete ' + name);
+  if (!w.ok) return json({ error: w.error }, w.status);
   purgeCache(ctx, name);
-  // 若该图在过期清单里，同步移除条目（后台执行）
-  if (ctx && ctx.waitUntil) { ctx.waitUntil((async function() {
-    const man = await readManifest(env);
-    if (man && man.expires[name]) {
-      delete man.expires[name];
-      await writeManifest(env, man, 'delete ' + name);
-    }
-  })().catch(function() {})); }
   return json({ ok: true, name }, 200);
 }
 
@@ -207,22 +210,28 @@ async function readManifest(env) {
   const d = await r.json();
   let data = {};
   try { data = JSON.parse(atob(d.content.replace(/\s/g, ''))); } catch (e) { data = {}; }
-  return { sha: d.sha, expires: (data && data.expires) || {} };
+  return { sha: d.sha, expires: (data && data.expires) || {}, deleted: (data && data.deleted) || {} };
 }
 
 async function writeManifest(env, man, msg) {
-  const payload = { message: msg, content: btoa(JSON.stringify({ version: 1, expires: man.expires })), branch: GH_BRANCH };
-  if (man.sha) payload.sha = man.sha;
-  const r = await fetch('https://api.github.com/repos/' + GH_USER + '/' + GH_REPO + '/contents/' + MANIFEST, {
-    method: 'PUT',
-    headers: { Authorization: 'Bearer ' + env.GH_TOKEN, 'User-Agent': 'img-bed', 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!r.ok) {
-    const msg2 = (await r.text()).slice(0, 200);
-    return { ok: false, status: r.status, error: '过期清单写入失败 (' + r.status + '): ' + msg2 };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const payload = { message: msg, content: btoa(JSON.stringify({ version: 2, expires: man.expires, deleted: man.deleted })), branch: GH_BRANCH };
+    if (man.sha) payload.sha = man.sha;
+    const r = await fetch('https://api.github.com/repos/' + GH_USER + '/' + GH_REPO + '/contents/' + MANIFEST, {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer ' + env.GH_TOKEN, 'User-Agent': 'img-bed', 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (r.ok) return { ok: true, status: 200 };
+    if (r.status !== 409 || attempt === 1) {
+      const msg2 = (await r.text()).slice(0, 200);
+      return { ok: false, status: r.status, error: '过期清单写入失败 (' + r.status + '): ' + msg2 };
+    }
+    // 409：清单被并发修改，重读 sha 再写一次
+    const fresh = await readManifest(env);
+    if (!fresh) return { ok: false, status: 502, error: '过期清单重读失败' };
+    man.sha = fresh.sha;
   }
-  return { ok: true, status: 200 };
 }
 
 // 检查并删除已到期的图片（cron 定时 + 后台打开时都会触发）
@@ -235,7 +244,7 @@ async function checkExpired(env, ctx) {
   let removed = false;
   for (const entry of due) {
     const r = await deleteFile(env, entry[0]);
-    if (r.ok) { delete man.expires[entry[0]]; removed = true; purgeCache(ctx, entry[0]); }
+    if (r.ok) { delete man.expires[entry[0]]; man.deleted[entry[0]] = new Date().toISOString(); removed = true; purgeCache(ctx, entry[0]); }
   }
   if (removed) await writeManifest(env, man, 'expire cleanup');
 }
@@ -261,6 +270,36 @@ async function handleExpiry(request, env) {
   const w = await writeManifest(env, man, 'set expiry ' + name);
   if (!w.ok) return json({ error: w.error }, w.status);
   return json({ ok: true, name, expires_at: man.expires[name] || null }, 200);
+}
+
+// ============ 图片路由 /i/<name>：未删除 302 到 jsDelivr，已删除 410（URL 彻底失效） ============
+let goneCache = null, goneAt = 0;
+
+async function handleImage(request, env) {
+  const name = decodeURIComponent(new URL(request.url).pathname.slice(3));
+  if (!safeName(name)) return json({ error: 'not found' }, 404);
+  const gone = await goneNames(env);
+  if (gone.has(name)) {
+    return new Response('gone', { status: 410, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', ...cors() } });
+  }
+  const target = 'https://testingcf.jsdelivr.net/gh/' + GH_USER + '/' + GH_REPO + '@' + GH_BRANCH + '/' + name;
+  return new Response(null, { status: 302, headers: { 'location': target, 'cache-control': 'no-store', ...cors() } });
+}
+
+// 已删除名单（墓碑）：内存缓存 30 秒，删除后最长 30 秒内 URL 变 410
+async function goneNames(env) {
+  if (goneCache && Date.now() - goneAt < 30000) return goneCache;
+  const set = new Set();
+  try {
+    const r = await fetch('https://raw.githubusercontent.com/' + GH_USER + '/' + GH_REPO + '/' + GH_BRANCH + '/.imgbed.json', { headers: { 'User-Agent': 'img-bed' } });
+    if (r.ok) {
+      const d = await r.json();
+      for (const k of Object.keys((d && d.deleted) || {})) set.add(k);
+    }
+  } catch (e) { /* 读取失败沿用旧缓存（无缓存则放行） */ }
+  goneCache = set;
+  goneAt = Date.now();
+  return set;
 }
 
 // 文件名 → 上传时间，兼容 20260812_123456_abcd.jpg 与 20260810095517_x4dm.jpg
