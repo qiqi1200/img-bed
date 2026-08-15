@@ -205,7 +205,7 @@ async function readManifest(env) {
   const r = await fetch('https://api.github.com/repos/' + GH_USER + '/' + GH_REPO + '/contents/' + MANIFEST, {
     headers: { Authorization: 'Bearer ' + env.GH_TOKEN, 'User-Agent': 'img-bed', Accept: 'application/vnd.github+json' },
   });
-  if (r.status === 404) return { sha: null, expires: {} };
+  if (r.status === 404) return { sha: null, expires: {}, deleted: {} };
   if (!r.ok) return null;
   const d = await r.json();
   let data = {};
@@ -286,17 +286,18 @@ async function handleImage(request, env) {
   return new Response(null, { status: 302, headers: { 'location': target, 'cache-control': 'no-store', ...cors() } });
 }
 
-// 已删除名单（墓碑）：内存缓存 30 秒，删除后最长 30 秒内 URL 变 410
+// 已删除名单（墓碑）：内存缓存 30 秒，删除后最长 30 秒内 URL 变 410。
+// 走 GitHub Contents API 而不是 raw.githubusercontent：raw CDN 会缓存旧清单（max-age=300），
+// 导致删除后墓碑迟迟不生效；API 读取的是最新提交内容。
 async function goneNames(env) {
   if (goneCache && Date.now() - goneAt < 30000) return goneCache;
-  const set = new Set();
-  try {
-    const r = await fetch('https://raw.githubusercontent.com/' + GH_USER + '/' + GH_REPO + '/' + GH_BRANCH + '/.imgbed.json', { headers: { 'User-Agent': 'img-bed' } });
-    if (r.ok) {
-      const d = await r.json();
-      for (const k of Object.keys((d && d.deleted) || {})) set.add(k);
-    }
-  } catch (e) { /* 读取失败沿用旧缓存（无缓存则放行） */ }
+  const man = await readManifest(env);
+  if (!man) {
+    // API 读取失败：有旧缓存就续用旧缓存，没有就放行（避免误杀正常图片）
+    if (goneCache) { goneAt = Date.now(); return goneCache; }
+    return new Set();
+  }
+  const set = new Set(Object.keys(man.deleted || {}));
   goneCache = set;
   goneAt = Date.now();
   return set;
